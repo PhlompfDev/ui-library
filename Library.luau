@@ -1741,37 +1741,6 @@ local function buildShell(theme, options)
 		Size = UDim2.new(1, 0, 0, 0),
 	}, { make("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }) })
 
-	local footer = make("Frame", {
-		Name = "Footer",
-		Parent = sidebar,
-		AnchorPoint = Vector2.new(0, 1),
-		BackgroundTransparency = 1,
-		Position = UDim2.new(0, 16, 1, -16),
-		Size = UDim2.new(1, -32, 0, 24),
-	})
-	refs.keycap = make("TextLabel", {
-		Name = "Keycap",
-		Parent = footer,
-		BackgroundColor3 = theme.control,
-		FontFace = font("Bold"),
-		TextColor3 = theme.text,
-		Text = "RCtrl",
-		TextSize = 12,
-		Size = UDim2.fromOffset(52, 24),
-	}, { corner(0, 4) })
-	make("TextLabel", {
-		Name = "Hint",
-		Parent = footer,
-		FontFace = font("Regular"),
-		TextColor3 = theme.textDim,
-		Text = "show / hide",
-		BackgroundTransparency = 1,
-		TextXAlignment = Enum.TextXAlignment.Left,
-		Position = UDim2.fromOffset(60, 0),
-		TextSize = 13,
-		Size = UDim2.new(1, -60, 1, 0),
-	})
-
 	make("Frame", {
 		Name = "Wash",
 		Parent = sidebar,
@@ -2302,7 +2271,6 @@ function Plorch.new(options)
 
 	local function setToggleKey(code)
 		toggleKey = code
-		refs.keycap.Text = keyName(code)
 	end
 
 	-----------------------------------------------------------------------------------------
@@ -3755,7 +3723,8 @@ function Plorch.new(options)
 
 	local statusFrame, statusDot, statusLabel
 
-	-- A one-line status above the pinned tab: window:setStatus("Idle"), or with a tone
+	-- A one-line status under the pinned tab, laid out like a tab (dot where the icon sits,
+	-- label where the name sits): window:setStatus("Idle"), or with a tone
 	-- ("accent", "good", "warn", "bad", "dim"). Pass nil to hide it.
 	function window:setStatus(text, tone)
 		ui(function()
@@ -3765,29 +3734,29 @@ function Plorch.new(options)
 					Parent = refs.sidebar,
 					AnchorPoint = Vector2.new(0, 1),
 					BackgroundTransparency = 1,
-					Position = UDim2.new(0, 16, 1, -104),
-					Size = UDim2.new(1, -32, 0, 18),
+					Position = UDim2.new(0, 12, 1, -16),
+					Size = UDim2.new(1, -24, 0, 36),
 				})
 				statusDot = make("Frame", {
 					Name = "Dot",
 					Parent = statusFrame,
-					AnchorPoint = Vector2.new(0, 0.5),
-					Position = UDim2.new(0, 2, 0.5, 0),
+					AnchorPoint = Vector2.new(0.5, 0.5),
+					Position = UDim2.new(0, 22, 0.5, 0),
 					BackgroundColor3 = theme.textDim,
-					Size = UDim2.fromOffset(6, 6),
+					Size = UDim2.fromOffset(10, 10),
 				}, { fullCorner() })
 				statusLabel = make("TextLabel", {
 					Name = "Label",
 					Parent = statusFrame,
-					FontFace = font("Regular"),
-					TextColor3 = theme.textDim,
+					FontFace = font("Medium"),
+					TextColor3 = theme.text,
 					Text = "",
 					BackgroundTransparency = 1,
 					TextXAlignment = Enum.TextXAlignment.Left,
 					TextTruncate = Enum.TextTruncate.AtEnd,
-					Position = UDim2.fromOffset(16, 0),
-					TextSize = 13,
-					Size = UDim2.new(1, -16, 1, 0),
+					Position = UDim2.fromOffset(38, 0),
+					TextSize = 16,
+					Size = UDim2.new(1, -46, 1, 0),
 				})
 			end
 			statusFrame.Visible = text ~= nil

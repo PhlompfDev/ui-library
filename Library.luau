@@ -927,6 +927,7 @@ local OPTION_SELECTED_TRANSPARENCY = 0.5 -- resting fill of the current choice (
 local MENU_MAX_VISIBLE = 6 -- options a menu shows at once; the rest scroll
 local MENU_SEARCH_HEIGHT = 32 -- a menu's search field plus the gap above it
 local CONFIG_FORMAT = 1 -- version written into every config payload
+local SECTION_GAP = 16 -- space under each section; part of the section so it collapses with it
 local AUTOSAVE_DELAY = 0.5
 
 -- Spring numbers and animated goals, keyed by element kind. Kept identical to the TUNING
@@ -3043,7 +3044,10 @@ function Plorch.new(options)
 
 		page.sectionOrder += 1
 		-- The holder is what the page lays out; it only takes a fixed height (and clips) while
-		-- the section is sliding open or shut.
+		-- the section is sliding open or shut. Its 1 px padding keeps the card's outline, which
+		-- is drawn outside the card, inside the clip, so the outline slides with the card. The
+		-- gap to the next section is its bottom padding, not the page list's, so a section that
+		-- collapses to nothing takes its gap with it and its neighbours never jump.
 		local holder = make("Frame", {
 			Name = "Section_" .. identifier(sectionTitle),
 			Parent = page.instance,
@@ -3051,6 +3055,13 @@ function Plorch.new(options)
 			BackgroundTransparency = 1,
 			AutomaticSize = Enum.AutomaticSize.Y,
 			Size = UDim2.new(1, 0, 0, 0),
+		}, {
+			make("UIPadding", {
+				PaddingBottom = UDim.new(0, 1 + SECTION_GAP),
+				PaddingTop = UDim.new(0, 1),
+				PaddingLeft = UDim.new(0, 1),
+				PaddingRight = UDim.new(0, 1),
+			}),
 		})
 		local sectionFrame = card(theme, "Card", 0, 12)
 		sectionFrame.Parent = holder
@@ -3152,7 +3163,7 @@ function Plorch.new(options)
 					end
 					local show = entry("section", "show")
 					spr.target(holder, show.damping, show.frequency, {
-						Size = UDim2.new(1, 0, 0, sectionFrame.AbsoluteSize.Y / scale),
+						Size = UDim2.new(1, 0, 0, sectionFrame.AbsoluteSize.Y / scale + 2 + SECTION_GAP),
 					})
 					spr.completed(holder, function()
 						if visibilityToken == token then
@@ -4062,7 +4073,10 @@ function Plorch.new(options)
 		end
 		local tab = buildTab(theme, name, config.icon or "Folder", order)
 		tab.button.Parent = refs.tabList
-		local instance = scroller(theme, "Page_" .. identifier(name), { Page = name }, 16)
+		-- Sections carry their own gap (see addSection), so the list adds none and the page's
+		-- bottom padding gives up what the last section's gap already provides.
+		local instance = scroller(theme, "Page_" .. identifier(name), { Page = name }, 0)
+		instance:FindFirstChildOfClass("UIPadding").PaddingBottom = UDim.new(0, 24 - SECTION_GAP)
 		instance.Parent = pageHost
 
 		local page = { name = name, instance = instance, tab = tab, sections = {}, sectionOrder = 0 }

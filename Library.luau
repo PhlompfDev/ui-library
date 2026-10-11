@@ -924,6 +924,9 @@ local OPTION_STAGGER = 0.025 -- seconds between each option fading in
 local MENU_COLLAPSED_HEIGHT = 10 -- the menu unrolls from, and rolls back to, this height
 local MENU_CLOSE_TIME = 0.16 -- seconds the close gets before the menu stops rendering
 local OPTION_SELECTED_TRANSPARENCY = 0.5 -- resting fill of the current choice (hover is 0)
+local MENU_MAX_VISIBLE = 6 -- options a menu shows at once; the rest scroll
+local MENU_SEARCH_HEIGHT = 32 -- a menu's search field plus the gap above it
+local CONFIG_FORMAT = 1 -- version written into every config payload
 local AUTOSAVE_DELAY = 0.5
 
 -- Spring numbers and animated goals, keyed by element kind. Kept identical to the TUNING
@@ -1034,6 +1037,10 @@ local TUNING = {
 	},
 	["action-primary"] = {
 		hover = { damping = 1, frequency = 6, goal = { BackgroundColor3 = "#FFBF40" } },
+	},
+	["section"] = {
+		show = { damping = 0.85, frequency = 4.5 },
+		hide = { damping = 1, frequency = 6 },
 	},
 }
 
@@ -1247,10 +1254,11 @@ function executorGlobal(name)
 	return nil
 end
 
--- { writefile, readfile, isfile, makefolder?, isfolder? } or nil when files are unavailable.
+-- { writefile, readfile, isfile, makefolder?, isfolder?, listfiles?, delfile? } or nil when
+-- files are unavailable.
 local function fileApi()
 	local files = {}
-	for _, name in ipairs({ "writefile", "readfile", "isfile", "makefolder", "isfolder" }) do
+	for _, name in ipairs({ "writefile", "readfile", "isfile", "makefolder", "isfolder", "listfiles", "delfile" }) do
 		local found = executorGlobal(name)
 		if type(found) == "function" then
 			files[name] = found
@@ -1728,7 +1736,7 @@ local function buildShell(theme, options)
 		Parent = sidebar,
 		Position = UDim2.fromOffset(12, 69),
 		BackgroundTransparency = 1,
-		Size = UDim2.new(1, -24, 1, -125),
+		Size = UDim2.new(1, -24, 1, -85),
 	}, {
 		make("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }),
 	})
@@ -1969,12 +1977,54 @@ local function buildShell(theme, options)
 		Attr = { PlopacleNode = "dropdown-menu" },
 	}, { corner(0, 8) })
 	refs.dropdownMenu = dropdownMenu
-	local menuList = make("Frame", {
-		Name = "List",
+	-- Body: the menu's content at full height. The menu is a window onto it that unrolls.
+	local menuBody = make("Frame", {
+		Name = "Body",
 		Parent = dropdownMenu,
-		AutomaticSize = Enum.AutomaticSize.Y,
 		BackgroundTransparency = 1,
 		Size = UDim2.new(1, 0, 0, 0),
+	})
+	refs.menuBody = menuBody
+	local menuSearch = make("Frame", {
+		Name = "Search",
+		Parent = menuBody,
+		BackgroundColor3 = theme.bg,
+		Position = UDim2.fromOffset(4, 4),
+		Size = UDim2.new(1, -8, 0, MENU_SEARCH_HEIGHT - 4),
+	}, { corner(0, 6) })
+	refs.menuSearch = menuSearch
+	refs.menuSearchStroke = make("UIStroke", {
+		Name = "Stroke",
+		Parent = menuSearch,
+		Color = theme.border,
+		Transparency = 0.4,
+		Attr = { PlopacleNode = "field-stroke" },
+	})
+	refs.menuSearchInput = make("TextBox", {
+		Name = "Input",
+		Parent = menuSearch,
+		FontFace = font("Regular"),
+		ClipsDescendants = true,
+		TextColor3 = theme.text,
+		Text = "",
+		ClearTextOnFocus = false,
+		Position = UDim2.fromOffset(8, 0),
+		TextXAlignment = Enum.TextXAlignment.Left,
+		BackgroundTransparency = 1,
+		PlaceholderColor3 = theme.textDim,
+		TextSize = 13,
+		PlaceholderText = "Search",
+		Size = UDim2.new(1, -16, 1, 0),
+	})
+	local menuList = make("ScrollingFrame", {
+		Name = "List",
+		Parent = menuBody,
+		ScrollBarThickness = 3,
+		BackgroundTransparency = 1,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+		ScrollBarImageColor3 = theme.border,
+		Size = UDim2.fromScale(1, 1),
 	}, {
 		make("UIPadding", {
 			PaddingBottom = UDim.new(0, 4),
@@ -1985,6 +2035,17 @@ local function buildShell(theme, options)
 		make("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }),
 	})
 	refs.menuList = menuList
+	refs.menuEmpty = make("TextLabel", {
+		Name = "Empty",
+		Parent = menuBody,
+		Visible = false,
+		FontFace = font("Regular"),
+		TextColor3 = theme.textDim,
+		Text = "No matches",
+		BackgroundTransparency = 1,
+		TextSize = 13,
+		Size = UDim2.new(1, 0, 0, OPTION_HEIGHT + 8),
+	})
 	local check = ICONS.Check
 	refs.optionTemplate = make("TextButton", {
 		Name = "OptionTemplate",
@@ -2365,12 +2426,54 @@ function Plorch.new(options)
 		return middle >= top and middle <= top + pageHost.AbsoluteSize.Y
 	end
 
+	local menuBody, menuSearch, menuSearchInput = refs.menuBody, refs.menuSearch, refs.menuSearchInput
+	local menuItems = {} -- { button, option, text, rest, from } for the open menu, in option order
+	local menuWidth, menuSearchHeight = 160, 0
+	local settingSearch = false -- true while the search text is being reset by the library
+
 	local function clearOptions()
-		for _, child in ipairs(menuList:GetChildren()) do
-			if child:GetAttribute("Option") then
-				child:Destroy()
-			end
+		for _, item in ipairs(menuItems) do
+			item.button:Destroy()
 		end
+		table.clear(menuItems)
+	end
+
+	local function listHeight(count)
+		return count * OPTION_HEIGHT + math.max(count - 1, 0) * 2 + 8
+	end
+
+	-- An option fades in from the `option.enter` start values.
+	local function enterOption(item, delay)
+		local enter = entry("option", "enter")
+		spr.stop(item.button)
+		for prop, value in pairs(item.from) do
+			item.button[prop] = value
+		end
+		task.delay(delay, function()
+			if item.button.Parent then
+				spr.target(item.button, enter.damping, enter.frequency, item.rest)
+			end
+		end)
+	end
+
+	-- Shows the options that match `query`, sizes the list to at most MENU_MAX_VISIBLE of
+	-- them (the rest scroll) and returns the menu's full height.
+	local function layoutMenu(query, animate)
+		local matches = 0
+		for _, item in ipairs(menuItems) do
+			local match = query == "" or item.text:find(query, 1, true) ~= nil
+			if match then
+				matches += 1
+				if animate and not item.button.Visible then
+					enterOption(item, math.min(matches - 1, MENU_MAX_VISIBLE) * OPTION_STAGGER)
+				end
+			end
+			item.button.Visible = match
+		end
+		refs.menuEmpty.Visible = matches == 0
+		menuList.CanvasSize = UDim2.fromOffset(0, matches == 0 and 0 or listHeight(matches))
+		local height = matches == 0 and OPTION_HEIGHT + 8 or listHeight(math.min(matches, MENU_MAX_VISIBLE))
+		return menuSearchHeight + height
 	end
 
 	-- The menu rolls back up into its field and fades; clicks pass through straight away.
@@ -2386,6 +2489,7 @@ function Plorch.new(options)
 			menuFollow:Disconnect()
 			menuFollow = nil
 		end
+		menuSearchInput:ReleaseFocus()
 		refs.catcher.Visible = false
 		toRest(dropdown.chevron, "dropdown-chevron", "open")
 		toRest(dropdown.stroke, "dropdown-stroke", "open")
@@ -2408,44 +2512,56 @@ function Plorch.new(options)
 		clearOptions()
 		openMenu = dropdown
 
+		-- The search field sits above the list unless the dropdown opted out.
+		local hasSearch = dropdown.search ~= false
+		menuSearchHeight = hasSearch and MENU_SEARCH_HEIGHT or 0
+		menuSearch.Visible = hasSearch
+		settingSearch = true
+		menuSearchInput.Text = ""
+		settingSearch = false
+		menuList.Position = UDim2.fromOffset(0, menuSearchHeight)
+		menuList.Size = UDim2.new(1, 0, 1, -menuSearchHeight)
+		refs.menuEmpty.Position = UDim2.fromOffset(0, menuSearchHeight)
+
 		local current = dropdown.get()
-		local enter = entry("option", "enter")
+		local count = #dropdown.options
+		-- Open scrolled so the current choice is in view, a couple of options down.
+		local currentIndex = table.find(dropdown.options, current) or 1
+		local skipped = math.clamp(currentIndex - 3, 0, math.max(count - MENU_MAX_VISIBLE, 0))
+		local from = motion.decodeProps(entry("option", "enter").from)
 		for index, option in ipairs(dropdown.options) do
-			local item = refs.optionTemplate:Clone()
-			item.Name = "Option_" .. index
-			item:SetAttribute("Option", true)
-			item.LayoutOrder = index
-			item.Text = tostring(option)
-			item.Check.Visible = option == current
+			local button = refs.optionTemplate:Clone()
+			button.Name = "Option_" .. index
+			button:SetAttribute("Option", true)
+			button.LayoutOrder = index
+			button.Text = tostring(option)
+			button.Check.Visible = option == current
 			if option == current then
-				item.BackgroundTransparency = OPTION_SELECTED_TRANSPARENCY
+				button.BackgroundTransparency = OPTION_SELECTED_TRANSPARENCY
 			end
-			item.Visible = true
-			item.Parent = menuList
-			bindHover(item, "option")
-			item.MouseButton1Click:Connect(function()
+			button.Visible = true
+			button.Parent = menuList
+			bindHover(button, "option")
+			button.MouseButton1Click:Connect(function()
 				dropdown.set(option)
 				closeDropdown()
 			end)
-			-- Options fade in one after another as the menu unrolls past them.
 			local rest = {}
-			for prop, value in pairs(motion.decodeProps(enter.from)) do
-				rest[prop] = item[prop]
-				item[prop] = value
+			for prop in pairs(from) do
+				rest[prop] = button[prop]
 			end
-			task.delay((index - 1) * OPTION_STAGGER, function()
-				if item.Parent then
-					spr.target(item, enter.damping, enter.frequency, rest)
-				end
-			end)
+			local item = { button = button, option = option, text = tostring(option):lower(), rest = rest, from = from }
+			table.insert(menuItems, item)
+			-- Options fade in one after another as the menu unrolls past them.
+			enterOption(item, math.clamp(index - skipped - 1, 0, MENU_MAX_VISIBLE) * OPTION_STAGGER)
 		end
 
 		-- Unroll downward from the field, or upward when the window's bottom edge is in the way.
-		local count = #dropdown.options
-		local height = count * OPTION_HEIGHT + math.max(count - 1, 0) * 2 + 8
+		local height = layoutMenu("", false)
 		local button = dropdown.button
 		local origin = button.AbsolutePosition - overlay.AbsolutePosition
 		local width = button.AbsoluteSize.X
+		menuWidth = width
 		local below = origin.Y + button.AbsoluteSize.Y + 4
 		local opensUp = below + height > overlay.AbsoluteSize.Y - 8
 		local anchor = opensUp and 1 or 0
@@ -2454,10 +2570,20 @@ function Plorch.new(options)
 		dropdownMenu.AnchorPoint = Vector2.new(0, anchor)
 		placeMenu(dropdown, opensUp)
 		dropdownMenu.Size = UDim2.fromOffset(width, MENU_COLLAPSED_HEIGHT)
-		menuList.AnchorPoint = Vector2.new(0, anchor)
-		menuList.Position = UDim2.fromScale(0, anchor)
+		menuBody.AnchorPoint = Vector2.new(0, anchor)
+		menuBody.Position = UDim2.fromScale(0, anchor)
+		menuBody.Size = UDim2.new(1, 0, 0, height)
 		refs.catcher.Visible = true
 		overlay.Visible = true
+		local scroll = Vector2.new(0, skipped * (OPTION_HEIGHT + 2))
+		menuList.CanvasPosition = scroll
+		local token = menuToken
+		task.defer(function()
+			-- Again once the list has its size; a position past the old window is clamped away.
+			if menuToken == token then
+				menuList.CanvasPosition = scroll
+			end
+		end)
 		playFrom(dropdownMenu, "dropdown-menu", "open")
 		local grow = entry("dropdown-menu", "grow")
 		spr.target(dropdownMenu, grow.damping, grow.frequency, { Size = UDim2.fromOffset(width, height) })
@@ -2479,6 +2605,38 @@ function Plorch.new(options)
 		closeDropdown()
 	end)
 
+	-- Typing filters the open menu; the menu springs to the height of what is left.
+	menuSearchInput:GetPropertyChangedSignal("Text"):Connect(function()
+		if settingSearch or not openMenu then
+			return
+		end
+		local query = menuSearchInput.Text:lower():match("^%s*(.-)%s*$")
+		local height = layoutMenu(query, true)
+		menuList.CanvasPosition = Vector2.zero
+		menuBody.Size = UDim2.new(1, 0, 0, height)
+		local grow = entry("dropdown-menu", "grow")
+		spr.target(dropdownMenu, grow.damping, grow.frequency, { Size = UDim2.fromOffset(menuWidth, height) })
+	end)
+	remember(refs.menuSearchStroke, "field-stroke", "focus")
+	menuSearchInput.Focused:Connect(function()
+		toGoal(refs.menuSearchStroke, "field-stroke", "focus")
+	end)
+	-- Enter picks the first match.
+	menuSearchInput.FocusLost:Connect(function(enterPressed)
+		toRest(refs.menuSearchStroke, "field-stroke", "focus")
+		local dropdown = openMenu
+		if not (enterPressed and dropdown) then
+			return
+		end
+		for _, item in ipairs(menuItems) do
+			if item.button.Visible then
+				dropdown.set(item.option)
+				closeDropdown()
+				return
+			end
+		end
+	end)
+
 	-----------------------------------------------------------------------------------------
 	-- Config (flags)
 
@@ -2487,57 +2645,211 @@ function Plorch.new(options)
 	local configFolder = options.configFolder or "Plorch"
 	local loadingConfig = false
 
+	local activeConfig = "default" -- the config autosave writes to
+	local configChanged -- assigned by the Settings page: refreshes its config picker
+
 	local function configPath(name)
-		return configFolder .. "/" .. (name or "default") .. ".json"
+		return configFolder .. "/" .. name .. ".json"
 	end
 
-	-- window:saveConfig(name?) -> boolean. Writes every flagged control's value to a file.
-	function window:saveConfig(name)
-		local files = fileApi()
-		if not files then
-			return false
+	-- A config name as it may be used for a file: letters, digits, spaces, - and _.
+	local function cleanName(name)
+		local cleaned = tostring(name or ""):gsub("[^%w _%-]", "")
+		return cleaned:match("^%s*(.-)%s*$"):sub(1, 32)
+	end
+
+	-- Makes the config folder one level at a time (makefolder does not nest everywhere).
+	local function ensureFolder(files)
+		if type(files.makefolder) ~= "function" or type(files.isfolder) ~= "function" then
+			return
 		end
-		local data = {}
+		local path = ""
+		for part in configFolder:gmatch("[^/]+") do
+			path = path == "" and part or (path .. "/" .. part)
+			if not files.isfolder(path) then
+				files.makefolder(path)
+			end
+		end
+	end
+
+	local function configExists(files, name)
+		local ok, found = pcall(files.isfile, configPath(name))
+		return ok and found == true
+	end
+
+	-- The saved form of a config. Sharing will send this same payload, so it carries its own
+	-- format version and name instead of relying on the file it sits in.
+	local function encodeConfig(name)
+		local values = {}
 		for flag, control in pairs(window.flags) do
 			local value = control.get()
 			if typeof(value) == "EnumItem" then
 				value = value.Name
 			end
-			data[flag] = value
+			values[flag] = value
 		end
-		return (pcall(function()
-			if type(files.makefolder) == "function" and type(files.isfolder) == "function" then
-				if not files.isfolder(configFolder) then
-					files.makefolder(configFolder)
-				end
-			end
-			files.writefile(configPath(name), HttpService:JSONEncode(data))
-		end))
+		return HttpService:JSONEncode({ plorch = CONFIG_FORMAT, name = name, values = values })
 	end
 
-	-- window:loadConfig(name?) -> boolean. Applies saved values; each fires its callback.
-	function window:loadConfig(name)
-		local files = fileApi()
-		if not files then
-			return false
-		end
+	-- Payload text -> { name, values }, or nil. Files written before the format carried a
+	-- version are a bare flag table.
+	local function decodeConfig(text)
 		local ok, data = pcall(function()
-			if not files.isfile(configPath(name)) then
-				return nil
-			end
-			return HttpService:JSONDecode(files.readfile(configPath(name)))
+			return HttpService:JSONDecode(text)
 		end)
 		if not ok or type(data) ~= "table" then
-			return false
+			return nil
 		end
+		if type(data.plorch) == "number" and type(data.values) == "table" then
+			return { name = data.name, values = data.values }
+		end
+		return { values = data }
+	end
+
+	local function applyConfig(values)
 		loadingConfig = true
-		for flag, value in pairs(data) do
+		for flag, value in pairs(values) do
 			local control = window.flags[flag]
 			if control then
 				pcall(control.set, value)
 			end
 		end
 		loadingConfig = false
+	end
+
+	-- Makes `name` the config in use and remembers it for the next session.
+	local function setActive(files, name)
+		activeConfig = name
+		pcall(function()
+			ensureFolder(files)
+			files.writefile(configFolder .. "/active.txt", name)
+		end)
+		if configChanged then
+			configChanged()
+		end
+	end
+
+	-- window:saveConfig(name?) -> boolean. Writes every flagged control's value to a file;
+	-- with no name, to the config in use.
+	function window:saveConfig(name)
+		local files = fileApi()
+		if not files then
+			return false
+		end
+		name = name ~= nil and cleanName(name) or activeConfig
+		if name == "" then
+			return false
+		end
+		return (pcall(function()
+			ensureFolder(files)
+			files.writefile(configPath(name), encodeConfig(name))
+		end))
+	end
+
+	-- window:loadConfig(name?) -> boolean. Applies saved values (each fires its callback) and
+	-- makes that config the one in use. With no name: the config used last session.
+	function window:loadConfig(name)
+		local files = fileApi()
+		if not files then
+			return false
+		end
+		if name == nil then
+			local ok, last = pcall(function()
+				local path = configFolder .. "/active.txt"
+				return files.isfile(path) and files.readfile(path) or nil
+			end)
+			name = ok and last and cleanName(last) or ""
+			if name == "" or not configExists(files, name) then
+				name = "default"
+			end
+		else
+			name = cleanName(name)
+		end
+		local ok, config = pcall(function()
+			if not files.isfile(configPath(name)) then
+				return nil
+			end
+			return decodeConfig(files.readfile(configPath(name)))
+		end)
+		if not ok or not config then
+			return false
+		end
+		setActive(files, name)
+		applyConfig(config.values)
+		return true
+	end
+
+	-- window:listConfigs() -> { name, ... }, sorted; always includes the config in use.
+	function window:listConfigs()
+		local files = fileApi()
+		local names = {}
+		if files and files.listfiles then
+			pcall(function()
+				for _, path in ipairs(files.listfiles(configFolder)) do
+					local name = tostring(path):match("([^/\\]+)%.json$")
+					if name and table.find(names, name) == nil then
+						table.insert(names, name)
+					end
+				end
+			end)
+		end
+		if table.find(names, activeConfig) == nil then
+			table.insert(names, activeConfig)
+		end
+		table.sort(names)
+		return names
+	end
+
+	function window:activeConfig()
+		return activeConfig
+	end
+
+	-- window:createConfig(name) -> boolean, reason. Saves the current values under a new name
+	-- and switches to it.
+	function window:createConfig(name)
+		local files = fileApi()
+		if not files then
+			return false, "This executor cannot write files"
+		end
+		name = cleanName(name)
+		if name == "" then
+			return false, "Type a name first"
+		end
+		if configExists(files, name) then
+			return false, "A config with that name already exists"
+		end
+		if not window:saveConfig(name) then
+			return false, "The file could not be written"
+		end
+		setActive(files, name)
+		return true
+	end
+
+	-- window:renameConfig(name) -> boolean, reason. Renames the config in use.
+	function window:renameConfig(name)
+		local files = fileApi()
+		if not files then
+			return false, "This executor cannot write files"
+		end
+		if not files.delfile then
+			return false, "This executor cannot delete files"
+		end
+		name = cleanName(name)
+		local old = activeConfig
+		if name == "" then
+			return false, "Type a name first"
+		end
+		if name == old then
+			return false, "That is already its name"
+		end
+		if configExists(files, name) then
+			return false, "A config with that name already exists"
+		end
+		if not window:saveConfig(name) then
+			return false, "The file could not be written"
+		end
+		pcall(files.delfile, configPath(old))
+		setActive(files, name)
 		return true
 	end
 
@@ -2608,7 +2920,7 @@ function Plorch.new(options)
 		local count = 0
 		for _, item in ipairs(searchIndex) do
 			local haystack = (item.title .. " " .. item.description .. " " .. item.page .. " " .. item.section):lower()
-			if item.row.Visible and haystack:find(query, 1, true) then
+			if item.row.Visible and not item.owner.hidden and haystack:find(query, 1, true) then
 				count += 1
 				local resultCard = refs.resultTemplate:Clone()
 				local head = resultCard:FindFirstChild("Head")
@@ -2730,8 +3042,18 @@ function Plorch.new(options)
 		end
 
 		page.sectionOrder += 1
-		local sectionFrame = card(theme, "Section_" .. identifier(sectionTitle), sectionConfig.order or page.sectionOrder, 12)
-		sectionFrame.Parent = page.instance
+		-- The holder is what the page lays out; it only takes a fixed height (and clips) while
+		-- the section is sliding open or shut.
+		local holder = make("Frame", {
+			Name = "Section_" .. identifier(sectionTitle),
+			Parent = page.instance,
+			LayoutOrder = sectionConfig.order or page.sectionOrder,
+			BackgroundTransparency = 1,
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Size = UDim2.new(1, 0, 0, 0),
+		})
+		local sectionFrame = card(theme, "Card", 0, 12)
+		sectionFrame.Parent = holder
 		local header = make("TextLabel", {
 			Name = "Header",
 			Parent = sectionFrame,
@@ -2744,7 +3066,7 @@ function Plorch.new(options)
 			Size = UDim2.new(1, 0, 0, 20),
 		})
 
-		local section = { instance = sectionFrame, page = page, title = sectionTitle }
+		local section = { instance = holder, card = sectionFrame, page = page, title = sectionTitle, hidden = false }
 		page.sections[sectionTitle] = section
 		local rowOrder = 0
 
@@ -2769,6 +3091,7 @@ function Plorch.new(options)
 				description = config.description or "",
 				page = page.name,
 				section = sectionTitle,
+				owner = section,
 			}
 			table.insert(searchIndex, item)
 			return item
@@ -2780,9 +3103,63 @@ function Plorch.new(options)
 			end)
 		end
 
-		function section:setVisible(visible)
+		local visibilityToken = 0
+
+		local function settle(visible)
+			holder.AutomaticSize = Enum.AutomaticSize.Y
+			holder.ClipsDescendants = false
+			holder.Size = UDim2.new(1, 0, 0, 0)
+			holder.Visible = visible
+		end
+
+		-- section:setVisible(bool, instant?): slides the section open or shut. A hidden
+		-- section's rows are left out of search.
+		function section:setVisible(visible, instant)
+			visible = visible == true
+			if section.hidden == not visible then
+				return
+			end
+			section.hidden = not visible
+			visibilityToken += 1
+			local token = visibilityToken
 			ui(function()
-				sectionFrame.Visible = visible == true
+				spr.stop(holder)
+				if instant or static or not frame.Visible then
+					settle(visible)
+					return
+				end
+				-- AbsoluteSize is in screen pixels; the window may be mid-scale.
+				local scale = windowScale.Scale > 0 and windowScale.Scale or 1
+				local height = holder.Visible and holder.AbsoluteSize.Y / scale or 0
+				holder.AutomaticSize = Enum.AutomaticSize.None
+				holder.ClipsDescendants = true
+				holder.Size = UDim2.new(1, 0, 0, height)
+				holder.Visible = true
+				if not visible then
+					local hide = entry("section", "hide")
+					spr.target(holder, hide.damping, hide.frequency, { Size = UDim2.new(1, 0, 0, 0) })
+					spr.completed(holder, function()
+						if visibilityToken == token then
+							holder.Visible = false
+						end
+					end)
+					return
+				end
+				task.spawn(function()
+					RunService.Heartbeat:Wait() -- let the card lay out before measuring it
+					if visibilityToken ~= token then
+						return
+					end
+					local show = entry("section", "show")
+					spr.target(holder, show.damping, show.frequency, {
+						Size = UDim2.new(1, 0, 0, sectionFrame.AbsoluteSize.Y / scale),
+					})
+					spr.completed(holder, function()
+						if visibilityToken == token then
+							settle(true)
+						end
+					end)
+				end)
 			end)
 		end
 
@@ -3030,6 +3407,16 @@ function Plorch.new(options)
 				end
 			end
 
+			-- A disabled button is a placeholder: dimmed, and it does nothing.
+			if config.disabled then
+				button.Active = false
+				button.TextColor3 = theme.textDim
+				local outline = button:FindFirstChildOfClass("UIStroke")
+				outline.Color = theme.border
+				outline.Transparency = 0.6
+				return object
+			end
+
 			button.MouseEnter:Connect(function()
 				toGoal(button, "button", "hover")
 			end)
@@ -3172,7 +3559,7 @@ function Plorch.new(options)
 				Attr = { PlopacleNode = "dropdown-chevron" },
 			})
 
-			local dropdown = { button = button, chevron = chevron, stroke = stroke, options = optionList }
+			local dropdown = { button = button, chevron = chevron, stroke = stroke, options = optionList, search = config.search }
 
 			local object = valueObject(rowObject(row, register(row, config)), config, flag, function()
 				return value
@@ -3197,8 +3584,9 @@ function Plorch.new(options)
 				object:set(option)
 			end
 
-			-- Replace the choices; keeps the current value if it is still offered.
-			function object:setOptions(newOptions)
+			-- Replace the choices. `selected`, if offered, becomes the value without running the
+			-- callback; otherwise the current value is kept if it is still offered.
+			function object:setOptions(newOptions, selected)
 				if openMenu == dropdown then
 					closeDropdown()
 				end
@@ -3206,7 +3594,9 @@ function Plorch.new(options)
 				for _, option in ipairs(newOptions) do
 					table.insert(optionList, option)
 				end
-				if table.find(optionList, value) == nil then
+				if selected ~= nil and table.find(optionList, selected) ~= nil then
+					object:set(selected, true)
+				elseif table.find(optionList, value) == nil then
 					value = nil
 					object:set(optionList[1])
 				end
@@ -3721,50 +4111,6 @@ function Plorch.new(options)
 		end)
 	end
 
-	local statusFrame, statusDot, statusLabel
-
-	-- A one-line status under the pinned tab, laid out like a tab (dot where the icon sits,
-	-- label where the name sits): window:setStatus("Idle"), or with a tone
-	-- ("accent", "good", "warn", "bad", "dim"). Pass nil to hide it.
-	function window:setStatus(text, tone)
-		ui(function()
-			if not statusFrame then
-				statusFrame = make("Frame", {
-					Name = "Status",
-					Parent = refs.sidebar,
-					AnchorPoint = Vector2.new(0, 1),
-					BackgroundTransparency = 1,
-					Position = UDim2.new(0, 12, 1, -16),
-					Size = UDim2.new(1, -24, 0, 36),
-				})
-				statusDot = make("Frame", {
-					Name = "Dot",
-					Parent = statusFrame,
-					AnchorPoint = Vector2.new(0.5, 0.5),
-					Position = UDim2.new(0, 22, 0.5, 0),
-					BackgroundColor3 = theme.textDim,
-					Size = UDim2.fromOffset(10, 10),
-				}, { fullCorner() })
-				statusLabel = make("TextLabel", {
-					Name = "Label",
-					Parent = statusFrame,
-					FontFace = font("Medium"),
-					TextColor3 = theme.text,
-					Text = "",
-					BackgroundTransparency = 1,
-					TextXAlignment = Enum.TextXAlignment.Left,
-					TextTruncate = Enum.TextTruncate.AtEnd,
-					Position = UDim2.fromOffset(38, 0),
-					TextSize = 16,
-					Size = UDim2.new(1, -46, 1, 0),
-				})
-			end
-			statusFrame.Visible = text ~= nil
-			statusLabel.Text = text ~= nil and tostring(text) or ""
-			statusDot.BackgroundColor3 = theme[tone == "dim" and "textDim" or (tone or "textDim")] or theme.textDim
-		end)
-	end
-
 	function window:setToggleKey(code)
 		local control = window.flags["Settings.ToggleKey"]
 		if control then
@@ -3835,6 +4181,96 @@ function Plorch.new(options)
 			callback = function()
 				window:destroy()
 			end,
+		})
+
+		local configs = settings:addSection("Configs")
+		if fileApi() then
+			local picker = configs:addDropdown({
+				id = "Config",
+				title = "Config",
+				description = "The saved setup in use",
+				options = window:listConfigs(),
+				default = activeConfig,
+				flag = false,
+				callback = function(name)
+					if name ~= activeConfig and window:loadConfig(name) then
+						window:notify("Config loaded", name)
+					end
+				end,
+			})
+			configChanged = function()
+				picker:setOptions(window:listConfigs(), activeConfig)
+			end
+			local nameBox = configs:addInput({
+				id = "ConfigName",
+				title = "Name",
+				description = "For a new config, or to rename this one",
+				placeholder = "Config name",
+				flag = false,
+			})
+			configs:addButton({
+				id = "CreateConfig",
+				title = "New config",
+				description = "Save the current settings under that name",
+				text = "Create",
+				callback = function()
+					local ok, reason = window:createConfig(nameBox:get())
+					if ok then
+						nameBox:set("", true)
+						window:notify("Config created", activeConfig)
+					else
+						window:notify("Config not created", reason)
+					end
+				end,
+			})
+			configs:addButton({
+				id = "RenameConfig",
+				title = "Rename config",
+				description = "Give the config in use that name",
+				text = "Rename",
+				callback = function()
+					local ok, reason = window:renameConfig(nameBox:get())
+					if ok then
+						nameBox:set("", true)
+						window:notify("Config renamed", activeConfig)
+					else
+						window:notify("Config not renamed", reason)
+					end
+				end,
+			})
+			configs:addButton({
+				id = "SaveConfig",
+				title = "Save config",
+				description = "Write the current settings to the config in use",
+				text = "Save",
+				callback = function()
+					if window:saveConfig() then
+						window:notify("Config saved", activeConfig)
+					else
+						window:notify("Config not saved", "The file could not be written")
+					end
+				end,
+			})
+		else
+			configs:addParagraph("Configs need an executor that can read and write files.")
+		end
+
+		-- Placeholders: a config already saves as a self-describing payload (format version,
+		-- name, values), which is what an export code will carry.
+		local sharing = settings:addSection("Sharing")
+		sharing:addButton({
+			id = "ExportConfig",
+			title = "Export config",
+			description = "Copy a code other people can import",
+			text = "Soon",
+			disabled = true,
+		})
+		sharing:addButton({
+			id = "ImportConfig",
+			title = "Import config",
+			description = "Load a config from someone's code",
+			text = "Soon",
+			disabled = true,
 		})
 	else
 		setToggleKey(toggleKey)

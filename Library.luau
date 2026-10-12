@@ -2210,7 +2210,8 @@ end
 	theme ({ token = Color3 }), parent, displayOrder, settingsPage (default true),
 	configFolder (default "Plorch"), autoSave (default false),
 	autoScale (default true: the window is sized for a 1080-line screen and grows or shrinks
-	with the viewport), mobileButton (default: on touch devices with no keyboard; a small
+	with the viewport), scale (default 1: a factor on the window's size, from 0.5 to 2, on top
+	of autoScale), mobileButton (default: on touch devices with no keyboard; a small
 	draggable button that opens and closes the window)
 ]=]
 function Plorch.new(options)
@@ -2298,14 +2299,18 @@ function Plorch.new(options)
 	-- so large that the window leaves the viewport. A phone is the exception: in proportion
 	-- the window would be too small to touch, so there it is as large as fits.
 	local fit = 1
+	local ownScale = math.clamp(tonumber(options.scale) or 1, 0.5, 2)
 	local function measureFit()
 		local camera = workspace.CurrentCamera
 		local viewport = camera and camera.ViewportSize
-		if static or options.autoScale == false or not viewport or viewport.X < 1 or viewport.Y < 1 then
+		if static then
 			return 1
 		end
+		if options.autoScale == false or not viewport or viewport.X < 1 or viewport.Y < 1 then
+			return ownScale
+		end
 		local size = frame.Size
-		local wanted = viewport.Y / REFERENCE_HEIGHT
+		local wanted = viewport.Y / REFERENCE_HEIGHT * ownScale
 		if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
 			wanted = math.max(wanted, 1)
 		end

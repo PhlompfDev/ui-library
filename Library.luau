@@ -2918,6 +2918,38 @@ function Plorch.new(options)
 		return true
 	end
 
+	-- window:deleteConfig(name?) -> boolean, reason. Deletes a config; with no name, the one in
+	-- use. Deleting the config in use switches to "default", which itself cannot be deleted.
+	function window:deleteConfig(name)
+		local files = fileApi()
+		if not files then
+			return false, "This executor cannot write files"
+		end
+		if not files.delfile then
+			return false, "This executor cannot delete files"
+		end
+		name = name ~= nil and cleanName(name) or activeConfig
+		if name == "default" then
+			return false, "The default config cannot be deleted"
+		end
+		if name == "" or not configExists(files, name) then
+			return false, "No config with that name"
+		end
+		if not pcall(files.delfile, configPath(name)) or configExists(files, name) then
+			return false, "The file could not be deleted"
+		end
+		if name ~= activeConfig then
+			if configChanged then
+				configChanged()
+			end
+		elseif not window:loadConfig("default") then
+			-- No default on disk yet: the current values become it.
+			setActive(files, "default")
+			window:saveConfig("default")
+		end
+		return true
+	end
+
 	function window:setAutoSave(enabled)
 		autoSave = enabled == true
 	end
@@ -4326,6 +4358,21 @@ function Plorch.new(options)
 						window:notify("Config saved", activeConfig)
 					else
 						window:notify("Config not saved", "The file could not be written")
+					end
+				end,
+			})
+			configs:addButton({
+				id = "DeleteConfig",
+				title = "Delete config",
+				description = "Removes the config in use and goes back to default",
+				text = "Delete",
+				callback = function()
+					local name = activeConfig
+					local ok, reason = window:deleteConfig()
+					if ok then
+						window:notify("Config deleted", name)
+					else
+						window:notify("Config not deleted", reason)
 					end
 				end,
 			})

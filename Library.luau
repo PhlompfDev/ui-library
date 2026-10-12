@@ -878,6 +878,7 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
 
 local Plorch = { version = "0.1.0" }
 
@@ -929,6 +930,12 @@ local MENU_SEARCH_HEIGHT = 32 -- a menu's search field plus the gap above it
 local CONFIG_FORMAT = 1 -- version written into every config payload
 local SECTION_GAP = 16 -- space under each section; part of the section so it collapses with it
 local AUTOSAVE_DELAY = 0.5
+local REFERENCE_HEIGHT = 1080 -- the screen height the window's pixel sizes were drawn for
+local MAX_FIT = 2 -- the window never grows past twice its drawn size
+local MIN_FIT = 0.45 -- nor shrinks below this, however small the screen
+local SCREEN_MARGIN = 24 -- pixels kept free around the window when it has to shrink
+local MOBILE_BUTTON_SIZE = 46
+local TAP_SLOP = 8 -- pixels a touch may wander and still count as a tap, not a drag
 
 -- Spring numbers and animated goals, keyed by element kind. Kept identical to the TUNING
 -- table of the Studio original so `verify_export` can diff the two.
@@ -2201,7 +2208,10 @@ end
 
 	options: title, subtitle, logo, name, size (Vector2), toggleKey (Enum.KeyCode),
 	theme ({ token = Color3 }), parent, displayOrder, settingsPage (default true),
-	configFolder (default "Plorch"), autoSave (default false)
+	configFolder (default "Plorch"), autoSave (default false),
+	autoScale (default true: the window is sized for a 1080-line screen and grows or shrinks
+	with the viewport), mobileButton (default: on touch devices with no keyboard; a small
+	draggable button that opens and closes the window)
 ]=]
 function Plorch.new(options)
 	options = options or {}
@@ -2283,8 +2293,32 @@ function Plorch.new(options)
 	-- A centred window lands on half pixels when the viewport is odd-sized, which blurs
 	-- everything drawn through the CanvasGroup. Nudge it onto whole pixels (at rest only:
 	-- the open/close scale moves AbsolutePosition).
+	-- The window is drawn for a 1080-line screen. `fit` is what its UIScale rests at on this
+	-- one: larger on a bigger screen, and never so large that the window leaves the viewport.
+	local fit = 1
+	local function measureFit()
+		local camera = workspace.CurrentCamera
+		local viewport = camera and camera.ViewportSize
+		if static or options.autoScale == false or not viewport or viewport.X < 1 or viewport.Y < 1 then
+			return 1
+		end
+		local size = frame.Size
+		local wanted = math.clamp(viewport.Y / REFERENCE_HEIGHT, 1, MAX_FIT)
+		local room = math.min((viewport.X - SCREEN_MARGIN) / size.X.Offset, (viewport.Y - SCREEN_MARGIN) / size.Y.Offset)
+		-- In steps of a twentieth, so a window sized in round numbers lands on whole pixels
+		-- and stays sharp through the CanvasGroup.
+		return math.max(math.floor(math.min(wanted, room) * 20 + 0.001) / 20, MIN_FIT)
+	end
+	fit = measureFit()
+	windowScale.Scale = fit
+
+	-- Screen pixels to the window's own units, for anything measured with Absolute*.
+	local function unscaled()
+		return windowScale.Scale > 0 and windowScale.Scale or 1
+	end
+
 	local function snapToPixels()
-		if math.abs(windowScale.Scale - 1) > 0.001 then
+		if math.abs(windowScale.Scale - fit) > 0.001 then
 			return
 		end
 		local position = frame.AbsolutePosition
@@ -2306,7 +2340,13 @@ function Plorch.new(options)
 			local wasHidden = not frame.Visible
 			frame.Visible = true
 			playFrom(frame, "window", "open", not wasHidden)
-			playFrom(windowScale, "window-scale", "open", not wasHidden)
+			-- The scale springs by hand: its rest is `fit`, not the 1 the tuning assumes.
+			local opening = entry("window-scale", "open")
+			if wasHidden then
+				spr.stop(windowScale)
+				windowScale.Scale = opening.from.Scale * fit
+			end
+			spr.target(windowScale, opening.damping, opening.frequency, { Scale = fit })
 		else
 			searchInput:ReleaseFocus()
 			closeDropdown()
@@ -2314,7 +2354,8 @@ function Plorch.new(options)
 				listeningBind.cancel()
 			end
 			toGoal(frame, "window", "close")
-			toGoal(windowScale, "window-scale", "close")
+			local closing = entry("window-scale", "close")
+			spr.target(windowScale, closing.damping, closing.frequency, { Scale = closing.goal.Scale * fit })
 			task.delay(CLOSE_HIDE_DELAY, function()
 				if openToken == token then
 					frame.Visible = false
@@ -2414,8 +2455,9 @@ function Plorch.new(options)
 
 	local function placeMenu(dropdown, opensUp)
 		local button = dropdown.button
-		local origin = button.AbsolutePosition - overlay.AbsolutePosition
-		local y = opensUp and origin.Y - 4 or origin.Y + button.AbsoluteSize.Y + 4
+		local scale = unscaled()
+		local origin = (button.AbsolutePosition - overlay.AbsolutePosition) / scale
+		local y = opensUp and origin.Y - 4 or origin.Y + button.AbsoluteSize.Y / scale + 4
 		dropdownMenu.Position = UDim2.fromOffset(math.round(origin.X), math.round(y))
 	end
 
@@ -2560,11 +2602,12 @@ function Plorch.new(options)
 		-- Unroll downward from the field, or upward when the window's bottom edge is in the way.
 		local height = layoutMenu("", false)
 		local button = dropdown.button
-		local origin = button.AbsolutePosition - overlay.AbsolutePosition
-		local width = button.AbsoluteSize.X
+		local scale = unscaled()
+		local origin = (button.AbsolutePosition - overlay.AbsolutePosition) / scale
+		local width = button.AbsoluteSize.X / scale
 		menuWidth = width
-		local below = origin.Y + button.AbsoluteSize.Y + 4
-		local opensUp = below + height > overlay.AbsoluteSize.Y - 8
+		local below = origin.Y + button.AbsoluteSize.Y / scale + 4
+		local opensUp = below + height > overlay.AbsoluteSize.Y / scale - 8
 		local anchor = opensUp and 1 or 0
 		spr.stop(dropdownMenu)
 		dropdownMenu.AutomaticSize = Enum.AutomaticSize.None
@@ -2576,7 +2619,8 @@ function Plorch.new(options)
 		menuBody.Size = UDim2.new(1, 0, 0, height)
 		refs.catcher.Visible = true
 		overlay.Visible = true
-		local scroll = Vector2.new(0, skipped * (OPTION_HEIGHT + 2))
+		-- A canvas position is in screen pixels, unlike the sizes around it.
+		local scroll = Vector2.new(0, skipped * (OPTION_HEIGHT + 2) * scale)
 		menuList.CanvasPosition = scroll
 		local token = menuToken
 		task.defer(function()
@@ -2893,7 +2937,7 @@ function Plorch.new(options)
 		selectPage(item.page)
 		RunService.Heartbeat:Wait() -- let the page lay out before measuring
 		local page = pages[item.page].instance
-		local y = item.row.AbsolutePosition.Y - page.AbsolutePosition.Y + page.CanvasPosition.Y - 16
+		local y = item.row.AbsolutePosition.Y - page.AbsolutePosition.Y + page.CanvasPosition.Y - 16 * unscaled()
 		page.CanvasPosition = Vector2.new(0, math.max(0, y))
 		local title = item.row:FindFirstChild("Title")
 		if title then
@@ -4396,7 +4440,73 @@ function Plorch.new(options)
 	local camera = workspace.CurrentCamera
 	if camera then
 		track(camera:GetPropertyChangedSignal("ViewportSize"):Connect(function()
+			local was = fit
+			fit = measureFit()
+			if fit ~= was then
+				-- Keep whatever the open or close spring is doing, at the new size.
+				local settled = isOpen and fit or entry("window-scale", "close").goal.Scale * fit
+				spr.stop(windowScale)
+				windowScale.Scale = settled
+			end
 			task.defer(snapToPixels)
+		end))
+	end
+
+	-- Touch devices have no menu key: a small button opens and closes the window. It can be
+	-- dragged out of the way, and a touch that does not move is a tap.
+	local wantsButton = options.mobileButton
+	if wantsButton == nil then
+		wantsButton = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+	end
+	if wantsButton then
+		local inset = GuiService:GetGuiInset()
+		local button = make("TextButton", {
+			Name = "MobileToggle",
+			Parent = gui,
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.new(0.5, 0, 0, inset.Y + 8),
+			Size = UDim2.fromOffset(MOBILE_BUTTON_SIZE, MOBILE_BUTTON_SIZE),
+			BackgroundColor3 = theme.white,
+			AutoButtonColor = false,
+			FontFace = font("ExtraBold"),
+			TextColor3 = theme.bg,
+			Text = refs.logo.Text,
+			TextSize = 22,
+			ZIndex = 50,
+		}, { corner(0, 12), ember(theme, 45) })
+		refs.mobileButton = button
+
+		local pressAt, pressPosition, moved
+		button.InputBegan:Connect(function(input)
+			if isPointerDown(input) then
+				pressAt, pressPosition, moved = input.Position, button.Position, false
+			end
+		end)
+		track(UserInputService.InputChanged:Connect(function(input)
+			if not (pressAt and isPointerMove(input)) then
+				return
+			end
+			local delta = input.Position - pressAt
+			if not moved and delta.Magnitude < TAP_SLOP then
+				return
+			end
+			moved = true
+			button.Position = UDim2.new(
+				pressPosition.X.Scale,
+				pressPosition.X.Offset + delta.X,
+				pressPosition.Y.Scale,
+				pressPosition.Y.Offset + delta.Y
+			)
+		end))
+		track(UserInputService.InputEnded:Connect(function(input)
+			if not (pressAt and isPointerDown(input)) then
+				return
+			end
+			local tapped = not moved
+			pressAt = nil
+			if tapped then
+				window:toggle()
+			end
 		end))
 	end
 

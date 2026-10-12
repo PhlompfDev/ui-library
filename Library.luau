@@ -2294,7 +2294,9 @@ function Plorch.new(options)
 	-- everything drawn through the CanvasGroup. Nudge it onto whole pixels (at rest only:
 	-- the open/close scale moves AbsolutePosition).
 	-- The window is drawn for a 1080-line screen. `fit` is what its UIScale rests at on this
-	-- one: larger on a bigger screen, and never so large that the window leaves the viewport.
+	-- one: in proportion to the viewport's height, as the game's own interface is, and never
+	-- so large that the window leaves the viewport. A phone is the exception: in proportion
+	-- the window would be too small to touch, so there it is as large as fits.
 	local fit = 1
 	local function measureFit()
 		local camera = workspace.CurrentCamera
@@ -2303,7 +2305,11 @@ function Plorch.new(options)
 			return 1
 		end
 		local size = frame.Size
-		local wanted = math.clamp(viewport.Y / REFERENCE_HEIGHT, 1, MAX_FIT)
+		local wanted = viewport.Y / REFERENCE_HEIGHT
+		if UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled then
+			wanted = math.max(wanted, 1)
+		end
+		wanted = math.min(wanted, MAX_FIT)
 		local room = math.min((viewport.X - SCREEN_MARGIN) / size.X.Offset, (viewport.Y - SCREEN_MARGIN) / size.Y.Offset)
 		-- In steps of a twentieth, so a window sized in round numbers lands on whole pixels
 		-- and stays sharp through the CanvasGroup.
@@ -2315,6 +2321,20 @@ function Plorch.new(options)
 	-- Screen pixels to the window's own units, for anything measured with Absolute*.
 	local function unscaled()
 		return windowScale.Scale > 0 and windowScale.Scale or 1
+	end
+
+	-- The window's place is kept as a fraction of the screen, so it moves with the viewport
+	-- when that is resized; the offset only ever holds the whole-pixel nudge below.
+	local function positionAsFraction()
+		local screen = gui.AbsoluteSize
+		if screen.X < 1 or screen.Y < 1 then
+			return
+		end
+		local position = frame.Position
+		frame.Position = UDim2.fromScale(
+			position.X.Scale + position.X.Offset / screen.X,
+			position.Y.Scale + position.Y.Offset / screen.Y
+		)
 	end
 
 	local function snapToPixels()
@@ -4406,6 +4426,7 @@ function Plorch.new(options)
 		end
 		if dragOrigin then
 			dragOrigin = nil
+			positionAsFraction()
 			snapToPixels()
 		end
 	end))
@@ -4447,6 +4468,10 @@ function Plorch.new(options)
 				local settled = isOpen and fit or entry("window-scale", "close").goal.Scale * fit
 				spr.stop(windowScale)
 				windowScale.Scale = settled
+			end
+			if not dragOrigin then
+				-- Drop the last nudge; it belonged to the old viewport.
+				frame.Position = UDim2.fromScale(frame.Position.X.Scale, frame.Position.Y.Scale)
 			end
 			task.defer(snapToPixels)
 		end))

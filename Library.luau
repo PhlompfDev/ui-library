@@ -2591,10 +2591,11 @@ function Plorch.new(options)
 		menuList.Size = UDim2.new(1, 0, 1, -menuSearchHeight)
 		refs.menuEmpty.Position = UDim2.fromOffset(0, menuSearchHeight)
 
+		local multi = dropdown.toggle ~= nil
 		local current = dropdown.get()
 		local count = #dropdown.options
 		-- Open scrolled so the current choice is in view, a couple of options down.
-		local currentIndex = table.find(dropdown.options, current) or 1
+		local currentIndex = not multi and table.find(dropdown.options, current) or 1
 		local skipped = math.clamp(currentIndex - 3, 0, math.max(count - MENU_MAX_VISIBLE, 0))
 		local from = motion.decodeProps(entry("option", "enter").from)
 		for index, option in ipairs(dropdown.options) do
@@ -2603,14 +2604,24 @@ function Plorch.new(options)
 			button:SetAttribute("Option", true)
 			button.LayoutOrder = index
 			button.Text = tostring(option)
-			button.Check.Visible = option == current
-			if option == current then
-				button.BackgroundTransparency = OPTION_SELECTED_TRANSPARENCY
+			-- A multi-select option shows a tick when on and stays open when clicked.
+			if multi then
+				button.Check.Visible = dropdown.isOn(option)
+			else
+				button.Check.Visible = option == current
+				if option == current then
+					button.BackgroundTransparency = OPTION_SELECTED_TRANSPARENCY
+				end
 			end
 			button.Visible = true
 			button.Parent = menuList
 			bindHover(button, "option")
 			button.MouseButton1Click:Connect(function()
+				if multi then
+					dropdown.toggle(option)
+					button.Check.Visible = dropdown.isOn(option)
+					return
+				end
 				dropdown.set(option)
 				closeDropdown()
 			end)
@@ -2700,6 +2711,11 @@ function Plorch.new(options)
 		end
 		for _, item in ipairs(menuItems) do
 			if item.button.Visible then
+				if dropdown.toggle then
+					dropdown.toggle(item.option)
+					item.button.Check.Visible = dropdown.isOn(item.option)
+					return
+				end
 				dropdown.set(item.option)
 				closeDropdown()
 				return
@@ -3672,6 +3688,9 @@ function Plorch.new(options)
 			})
 
 			local dropdown = { button = button, chevron = chevron, stroke = stroke, options = optionList, search = config.search }
+			if config._multi then
+				dropdown.isOn, dropdown.toggle = config._multi.isOn, config._multi.toggle
+			end
 
 			local object = valueObject(rowObject(row, register(row, config)), config, flag, function()
 				return value
@@ -3718,6 +3737,123 @@ function Plorch.new(options)
 			button.MouseButton1Click:Connect(function()
 				openDropdown(dropdown)
 			end)
+			return object
+		end
+
+		--[=[ section:addMultiDropdown({ title, description, items = { { id, title, default, callback }, ... }, summary })
+			A dropdown whose options are toggles. Each item is a flagged control of its own (saved
+			with the config) and the menu stays open while they are ticked. `summary(titles)` may
+			return the text for the field; by default "All", "None" or "2 of 4".
+			Returns an object with get(id), set(id, on, silent) and items[id] = { get, set }. ]=]
+		function section:addMultiDropdown(config)
+			config = config or {}
+			local entries, titles, byTitle, byId = {}, {}, {}, {}
+			for index, itemConfig in ipairs(config.items or {}) do
+				local name = tostring(itemConfig.title or itemConfig.id or index)
+				local item = {
+					id = itemConfig.id or identifier(name),
+					title = name,
+					on = itemConfig.default == true,
+					callback = itemConfig.callback,
+					flag = itemConfig.flag,
+				}
+				if item.flag == nil then
+					item.flag = page.name .. "." .. item.id
+				end
+				table.insert(entries, item)
+				table.insert(titles, name)
+				byTitle[name], byId[item.id] = item, item
+			end
+
+			local object
+			local function refresh()
+				local picked = {}
+				for _, item in ipairs(entries) do
+					if item.on then
+						table.insert(picked, item.title)
+					end
+				end
+				local text
+				if type(config.summary) == "function" then
+					local ok, result = pcall(config.summary, picked)
+					text = ok and tostring(result) or nil
+				end
+				text = text or (#picked == #entries and "All" or #picked == 0 and "None"
+					or ("%d of %d"):format(#picked, #entries))
+				ui(function()
+					local field = object.instance:FindFirstChild("Dropdown")
+					local label = field and field:FindFirstChild("Value")
+					if label then
+						label.Text = text
+					end
+					object.instance:SetAttribute("Value", text)
+				end)
+			end
+
+			local function setItem(item, on, silent)
+				on = on == true
+				if item.on == on then
+					return false
+				end
+				item.on = on
+				refresh()
+				if not silent then
+					fire(item.callback, on)
+					valueChanged()
+				end
+				return true
+			end
+
+			object = section:addDropdown({
+				id = config.id,
+				title = config.title,
+				description = config.description,
+				search = config.search,
+				options = titles,
+				default = titles[1],
+				flag = false,
+				_multi = {
+					isOn = function(title)
+						return byTitle[title] ~= nil and byTitle[title].on
+					end,
+					toggle = function(title)
+						local item = byTitle[title]
+						if item then
+							setItem(item, not item.on)
+						end
+					end,
+				},
+			})
+			object.items = {}
+			for _, item in ipairs(entries) do
+				object.items[item.id] = {
+					get = function()
+						return item.on
+					end,
+					set = function(_, on, silent)
+						setItem(item, on, silent)
+					end,
+				}
+				if item.flag ~= false then
+					window.flags[item.flag] = {
+						get = function()
+							return item.on
+						end,
+						set = function(value)
+							setItem(item, value)
+						end,
+					}
+				end
+			end
+			function object:get(id)
+				return byId[id] ~= nil and byId[id].on
+			end
+			function object:set(id, on, silent)
+				if byId[id] then
+					setItem(byId[id], on, silent)
+				end
+			end
+			refresh()
 			return object
 		end
 
